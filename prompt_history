@@ -95,3 +95,42 @@ def create_analysis_prompt(product_input: str, web_context: str = "") -> str:
 - 所有的换行符必须转义为 '\\n'。
 """
     return prompt
+
+
+V3:
+
+def create_analysis_prompt(product_input: str) -> str:
+    """创建强迫结构化输出且 Key 严格对齐的分析提示词"""
+    prompt = f"""
+你是一位在硅谷深耕多年的资深 AI 产品战略专家。
+请结合以下【实时搜集的情报】，对竞品 '{product_input}' 进行深度拆解。
+
+
+
+**🎯 核心输出要求（必须严格遵守）：**
+你必须返回一个严格的 JSON 对象，且 JSON 的 Key 必须【完全匹配】以下定义的名称，不得有误：
+
+1. **Key: "model_stack"**
+   内容要求：分析技术底座、AI 模型依赖、技术瓶颈。使用 Markdown 的 `###` 标题和列表。
+
+2. **Key: "scene_fit"**
+   内容要求：分析核心场景、用户准入门槛、场景延展性。使用 Markdown 的 `###` 标题和列表。
+
+3. **Key: "data_moat"**
+   内容要求：分析数据获取、反馈飞轮、护城河可持续性。使用 Markdown 的 `###` 标题和列表。
+
+4. **Key: "ux_friction"**
+   内容要求：分析认知负担、交互摩擦点、体验改进建议。使用 Markdown 的 `###` 标题和列表。
+
+5. **Key: "commercial_roi"**
+   内容要求：分析变现引擎、成本收益推算、增长潜力。使用 Markdown 的 `###` 标题和列表。
+
+6. **Key: "strategy_advice"**
+   内容要求：给出 1-2 条具体的、加粗的错位竞争金句建议。
+
+**⚠️ 格式禁令：**
+- **JSON 字段名（Key）严禁包含数字前缀**（如不要写成 "1. model_stack"）。
+- 所有 Value 中的内容必须结构化，多用 **加粗** 和 列表。
+- 所有的换行符必须转义为 '\\n'。
+"""
+    return prompt

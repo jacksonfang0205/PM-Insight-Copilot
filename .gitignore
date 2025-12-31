@@ -11,6 +11,7 @@ env/
 venv/
 ENV/
 .venv
+modelsAvailable.ipynb
 
 # Streamlit
 .streamlit/
@@ -25,3 +26,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Other
+prompt_history
+code20251230

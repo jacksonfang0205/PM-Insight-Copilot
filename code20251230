@@ -1,0 +1,388 @@
+import streamlit as st
+import google.generativeai as genai
+from typing import Dict, List, Union
+import json
+from datetime import datetime
+import ast
+import re
+import os
+from dotenv import load_dotenv
+from tavily import TavilyClient
+
+# 加载 .env 文件（如果存在）
+load_dotenv()
+
+# ==================== 配置区域 ====================
+def get_api_key() -> str:
+    try:
+        if hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets:
+            return st.secrets['GEMINI_API_KEY']
+    except Exception:
+        pass
+    api_key = os.getenv('GEMINI_API_KEY', '')
+    return api_key if api_key else ""
+
+def get_tavily_key() -> str:
+    if hasattr(st, 'secrets') and 'TAVILY_API_KEY' in st.secrets:
+        return st.secrets['TAVILY_API_KEY']
+    return os.getenv('TAVILY_API_KEY', '')
+
+TAVILY_API_KEY = get_tavily_key()
+GEMINI_API_KEY = get_api_key()
+
+# ==================== 页面配置 ====================
+st.set_page_config(
+    page_title="PM Insight Copilot",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ==================== 样式定制 ====================
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #666;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .analysis-section {
+        padding: 1rem;
+        border-radius: 8px;
+        background-color: #f8f9fa;
+        margin-bottom: 1rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==================== 初始化 Gemini ====================
+def init_gemini():
+    if not GEMINI_API_KEY:
+        st.error("⚠️ 请配置您的 Gemini API Key")
+        st.stop()
+    
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        generation_config = genai.types.GenerationConfig(
+            max_output_tokens=8192,
+            response_mime_type="application/json"
+        )
+        return genai.GenerativeModel("gemini-2.5-flash", generation_config=generation_config)
+    except Exception as e:
+        st.error(f"❌ Gemini API 初始化失败: {str(e)}")
+        st.stop()
+
+def fetch_competitor_context(product_input: str) -> str:
+    if not TAVILY_API_KEY:
+        return "（未配置 Tavily API，使用模型内置知识分析）"
+    try:
+        tavily = TavilyClient(api_key=TAVILY_API_KEY)
+        search_query = f"{product_input} latest features user feedback and market position 2025"
+        search_result = tavily.search(query=search_query, search_depth="advanced", max_results=5)
+        context = "以下是从互联网搜集的实时信息：\n"
+        for i, res in enumerate(search_result['results'], 1):
+            context += f"资料[{i}]: {res['content'][:1000]}\n来源: {res['url']}\n\n"
+        return context
+    except Exception as e:
+        return f"（搜索执行失败: {str(e)}）"
+
+# ==================== 提示词模板 ====================
+def create_partial_prompt(product_input: str, keys: List[str], web_context: str) -> str:
+    descriptions = {
+        "overview": "竞品概况 (产品核心定位、目标人群、3项核心业务线)",
+        "ux_features": "功能场景 (3个核心功能、典型使用场景、1个硬核交互痛点)",
+        "growth_ops": "运营增长 (3个核心增长手段、目前的运营重心、增长杠杆)",
+        "tech_stack": "技术栈分析 (模型依赖、RAG架构特点、技术壁垒)",
+        "data_metrics": "商业化指标 (3个主要变现点、估算的 ROI、用户活跃度)",
+        "strategy_advice": "错位竞争建议 (3条非对称竞争策略、建议的突破方向)"
+    }
+    
+    task_list = "\n".join([f"- KEY: '{k}'，重点: {descriptions[k]}" for k in keys])
+    
+    return f"""
+你是一位顶级 AI 产品专家。请针对竞品 '{product_input}' 进行深度建模。
+
+【参考情报】
+{web_context}
+
+**🎯 任务：**
+1. 请输出一个 JSON 对象，键名严格为: {json.dumps(keys)}。
+2. 每个维度输出 **3 个核心洞察点**（Bullet Points）。
+3. 严禁输出 "Executive Summary"，直接以 Markdown 列表或标题开始。
+4. 总字数适中，确保内容具备专业产品经理的洞察深度。
+
+**分析维度：**
+{task_list}
+"""
+
+# ==================== 工具函数 ====================
+def parse_json_safely(text: str) -> Dict:
+    try:
+        return json.loads(text.strip())
+    except:
+        try:
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except Exception as e:
+            st.error(f"解析 JSON 出错: {e}")
+    return {}
+
+def clean_text(data: Union[str, List, Dict]) -> Union[str, List, Dict]:
+    """递归清理文本，保留列表结构，防止将列表转为字符串"""
+    # 1. 如果是列表，递归处理每一项
+    if isinstance(data, list):
+        return [clean_text(item) for item in data]
+    
+    # 2. 如果是字典，递归处理每一个值
+    if isinstance(data, dict):
+        return {k: clean_text(v) for k, v in data.items()}
+    
+    # 3. 如果不是字符串（且不是列表/字典），直接返回（比如数字）
+    if not isinstance(data, str):
+        return data
+    
+    # 4. 字符串清理逻辑
+    text = data.replace('\\n', '\n').replace('\\"', '"')
+    text = re.sub(r'([^\n])###', r'\1\n\n###', text)
+    return text.strip()
+
+def format_list_to_markdown(content) -> str:
+    """将列表内容转换为 Markdown 无序列表字符串"""
+    if isinstance(content, list):
+        return "\n".join([f"- {item}" for item in content])
+    return str(content)
+
+# ==================== 执行分析 ====================
+def perform_analysis(model, product_input: str, web_context: str = "") -> Dict:
+    batches = [
+        ["overview", "ux_features", "growth_ops"],
+        ["tech_stack", "data_metrics", "strategy_advice"]
+    ]
+    
+    final_result = {}
+    
+    with st.status("🔍 正在构建产品模型...", expanded=True) as status:
+        for i, batch_keys in enumerate(batches):
+            status.write(f"正在分析批次 {i+1}/2...")
+            prompt = create_partial_prompt(product_input, batch_keys, web_context)
+            
+            try:
+                response = model.generate_content(prompt)
+                batch_json = parse_json_safely(response.text)
+                
+                for k in batch_keys:
+                    if k not in batch_json or not batch_json[k]:
+                        batch_json[k] = "⚠️ 该维度未能成功生成，请尝试重新运行。"
+                
+                final_result.update(batch_json)
+            except Exception as e:
+                for k in batch_keys:
+                    final_result[k] = f"❌ 生成错误: {str(e)}"
+        
+        status.update(label="✅ 分析完成", state="complete", expanded=False)
+    
+    # 使用递归清理函数，确保列表结构不被破坏
+    cleaned_result = clean_text(final_result)
+    return cleaned_result
+
+# ==================== Markdown 导出 ====================
+def generate_markdown_report(product_name: str, analysis_result: Dict) -> str:
+    """生成 Markdown 格式的报告"""
+    
+    # 辅助函数：从结果中提取并格式化
+    def get_fmt(key):
+        content = analysis_result.get(key, "暂无数据")
+        return format_list_to_markdown(content)
+
+    return f"""# 竞品分析报告：{product_name}
+**生成时间：** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+---
+## 1. 📊 竞品概况
+{get_fmt("overview")}
+
+## 2. 🎯 功能与体验分析
+{get_fmt("ux_features")}
+
+## 3. 📈 运营与增长策略
+{get_fmt("growth_ops")}
+
+## 4. 🏗️ 技术栈分析
+{get_fmt("tech_stack")}
+
+## 5. 💰 数据与商业化
+{get_fmt("data_metrics")}
+
+## 💡 策略启发与错位竞争
+{get_fmt("strategy_advice")}
+
+---
+*本报告由 PM Insight Copilot 自动生成*
+"""
+
+# ==================== 历史记录管理 ====================
+def add_to_history(product_name: str, analysis_result: Dict):
+    if 'history' not in st.session_state:
+        st.session_state['history'] = []
+    
+    # 移除旧记录
+    st.session_state['history'] = [h for h in st.session_state['history'] if h['product'] != product_name]
+    
+    st.session_state['history'].insert(0, {
+        'product': product_name,
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'analysis_result': analysis_result
+    })
+    
+    if len(st.session_state['history']) > 20:
+        st.session_state['history'] = st.session_state['history'][:20]
+
+def get_history() -> List[Dict]:
+    return st.session_state.get('history', [])
+
+# ==================== UI 渲染函数 ====================
+def display_content(title, content):
+    """渲染长页面中的每一个分析章节"""
+    st.markdown(f"## {title}")
+    st.markdown('<div class="analysis-section" style="background-color: #ffffff; border: 1px solid #e6e9ef; padding: 20px; border-radius: 10px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">', unsafe_allow_html=True)
+    
+    # 如果是列表，转换为 Markdown 列表展示
+    if isinstance(content, list):
+        formatted_list = "\n".join([f"- {item}" for item in content])
+        st.markdown(formatted_list)
+    elif isinstance(content, dict):
+        st.write(content)
+    else:
+        st.markdown(str(content))
+        
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ==================== 主界面 ====================
+def main():
+    # 侧边栏
+    with st.sidebar:
+        st.header("📚 历史记录")
+        history = get_history()
+        
+        if history:
+            st.write(f"最近查询了 {len(history)} 个产品")
+            st.markdown("---")
+            for idx, record in enumerate(history):
+                if st.button(f"{idx + 1}. {record['product']}", key=f"history_{idx}", use_container_width=True):
+                    st.session_state['selected_product'] = record['product']
+                    st.session_state['last_analysis'] = record['analysis_result']
+                    st.session_state['last_product'] = record['product']
+                    st.session_state['last_markdown'] = generate_markdown_report(record['product'], record['analysis_result'])
+                    st.rerun()
+            
+            if st.button("🗑️ 清空历史记录", use_container_width=True):
+                st.session_state['history'] = []
+                st.rerun()
+        else:
+            st.info("暂无历史记录")
+
+    # 标题
+    st.markdown('<h1 class="main-header">📊 PM Insight Copilot</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">AI 驱动的竞品深度分析工具</p>', unsafe_allow_html=True)
+    
+    model = init_gemini()
+    
+    st.markdown("---")
+    col_input1, col_input2 = st.columns([4, 1])
+    
+    with col_input1:
+        default_value = st.session_state.get('selected_product', '')
+        if not default_value:
+            default_value = st.session_state.get('last_product', '')
+        
+        if st.session_state.get('selected_product'):
+            del st.session_state['selected_product']
+        
+        product_input = st.text_input(
+            "请输入竞品名称或产品描述",
+            value=default_value,
+            placeholder="例如：ChatGPT、Perplexity、Granola 等",
+            label_visibility="visible"
+        )
+    
+    with col_input2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        analyze_button = st.button("🚀 开始深度分析", type="primary", use_container_width=True)
+    
+    st.markdown("---")
+
+    # 执行分析
+    if analyze_button:
+        if not product_input.strip():
+            st.warning("⚠️ 请输入竞品名称或产品描述")
+        else:
+            with st.status("🛸 正在全网搜集情报...", expanded=True) as status:
+                st.write("正在检索最新市场动态 (Tavily)...")
+                web_info = fetch_competitor_context(product_input)
+                
+                st.write("情报已汇总，正在进行逻辑建模...")
+                analysis_result = perform_analysis(model, product_input, web_info)
+            
+            if analysis_result:
+                status.update(label="✅ 深度分析完成", state="complete", expanded=False)                
+                add_to_history(product_input, analysis_result)
+                st.session_state['last_analysis'] = analysis_result
+                st.session_state['last_product'] = product_input
+                st.session_state['last_markdown'] = generate_markdown_report(product_input, analysis_result)
+                st.rerun()
+
+    # 显示结果（竖向长页面）
+    if 'last_analysis' in st.session_state and st.session_state.get('last_analysis'):
+        res = st.session_state['last_analysis']
+        product_name = st.session_state.get('last_product', '未知产品')
+        
+        st.success(f"✅ {product_name} 深度调研报告已生成")
+        st.info("💡 报告已按维度垂直展开，可直接滚动阅读或下载完整报告。")
+        
+        sections = [
+            ("🔍 竞品概况", "overview"),
+            ("🎯 功能场景分析", "ux_features"),
+            ("📈 增长与运营策略", "growth_ops"),
+            ("🏗️ 技术栈与底层架构", "tech_stack"),
+            ("💰 商业化与价值评估", "data_metrics"),
+            ("💡 错位竞争建议", "strategy_advice")
+        ]
+        
+        for title, key in sections:
+            content = res.get(key, "暂无内容")
+            
+            # 特殊高亮最后一项
+            if key == "strategy_advice":
+                st.markdown(f"## {title}")
+                st.markdown('<div class="analysis-section" style="background-color: #e3f2fd; border-left: 8px solid #1f77b4; padding: 20px; border-radius: 10px;">', unsafe_allow_html=True)
+                # 也要处理列表格式
+                if isinstance(content, list):
+                    st.markdown("\n".join([f"- {item}" for item in content]))
+                else:
+                    st.markdown(str(content))
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                display_content(title, content)
+            
+            st.markdown("---")
+
+        st.download_button(
+            label="📥 下载完整分析报告 (Markdown)",
+            data=st.session_state.get('last_markdown', ''),
+            file_name=f"调研报告_{product_name}.md",
+            mime="text/markdown",
+            type="primary",
+            use_container_width=True
+        )
+
+if __name__ == "__main__":
+    main()
