@@ -7,6 +7,7 @@ import ast
 import re
 import os
 from dotenv import load_dotenv
+from tavily import TavilyClient  # 新增导入，连网搜索
 
 # 加载 .env 文件（如果存在）
 load_dotenv()
@@ -31,6 +32,14 @@ def get_api_key() -> str:
     # 3. 如果都没有，返回空字符串
     return ""
 
+
+# 获取 Tavily API Key
+def get_tavily_key() -> str:
+    if hasattr(st, 'secrets') and 'TAVILY_API_KEY' in st.secrets:
+        return st.secrets['TAVILY_API_KEY']
+    return os.getenv('TAVILY_API_KEY', '')
+
+TAVILY_API_KEY = get_tavily_key()
 GEMINI_API_KEY = get_api_key()
 
 # ==================== 页面配置 ====================
@@ -115,149 +124,108 @@ def init_gemini():
         st.error(f"❌ Gemini API 初始化失败: {str(e)}")
         st.stop()
 
+def fetch_competitor_context(product_input: str) -> str:
+    """使用 Tavily 获取竞品的实时市场信息"""
+    if not TAVILY_API_KEY:
+        return "（未配置 Tavily API，使用模型内置知识分析）"
+    
+    try:
+        tavily = TavilyClient(api_key=TAVILY_API_KEY)
+        # 构造搜索词：竞品名 + 最新功能 + 用户评价 + 融资情况
+        search_query = f"{product_input} latest features user feedback and market position 2025"
+        
+        # 执行高级搜索，获取前 5 条深度内容
+        search_result = tavily.search(query=search_query, search_depth="advanced", max_results=5)
+        
+        context = "以下是从互联网搜集的实时信息：\n"
+        for i, res in enumerate(search_result['results'], 1):
+            context += f"资料[{i}]: {res['content'][:1000]}\n来源: {res['url']}\n\n"
+        return context
+    except Exception as e:
+        return f"（搜索执行失败: {str(e)}）"
+    
+
 # ==================== 分析提示词模板 ====================
-def create_analysis_prompt(product_input: str) -> str:
-    """创建分析提示词"""
+def create_analysis_prompt(product_input: str, web_context: str = "") -> str:
+    """创建强迫结构化输出且 Key 严格对齐的分析提示词"""
     prompt = f"""
-你是一位资深的产品经理和竞品分析专家。请对以下竞品或产品进行深度分析：
+你是一位在硅谷深耕多年的资深 AI 产品战略专家。
+请结合以下【实时搜集的情报】，对竞品 '{product_input}' 进行深度拆解。
 
-**分析对象：** {product_input}
+【实时情报参考】
+{web_context}
 
-**请严格按照以下 5 个维度进行结构化分析，每个维度都需要详细、专业的分析：**
+**🎯 核心输出要求（必须严格遵守）：**
+你必须返回一个严格的 JSON 对象，且 JSON 的 Key 必须【完全匹配】以下定义的名称，不得有误：
 
-## 1. Model Stack（技术栈与模型依赖）
-- 分析该产品使用的核心技术栈
-- 识别其依赖的 AI 模型或技术框架
-- 评估技术架构的先进性和可扩展性
-- 指出潜在的技术风险或依赖
+1. **Key: "model_stack"**
+   内容要求：分析技术底座、AI 模型依赖、技术瓶颈。使用 Markdown 的 `###` 标题和列表。
 
-## 2. Scene-Fit（核心解决的细分场景）
-- 明确该产品针对的具体使用场景
-- 分析场景的细分程度和精准度
-- 评估场景覆盖的完整性和深度
-- 识别未被充分满足的场景需求
+2. **Key: "scene_fit"**
+   内容要求：分析核心场景、用户准入门槛、场景延展性。使用 Markdown 的 `###` 标题和列表。
 
-## 3. Data Moat（数据闭环与护城河）
-- 分析产品的数据获取渠道和方式
-- 评估数据质量和数据量级
-- 识别数据闭环的形成机制
-- 评估数据护城河的强度和可持续性
+3. **Key: "data_moat"**
+   内容要求：分析数据获取、反馈飞轮、护城河可持续性。使用 Markdown 的 `###` 标题和列表。
 
-## 4. UX Friction（交互痛点分析）
-- 识别用户在使用过程中的主要痛点
-- 分析交互流程中的摩擦点
-- 评估用户体验的流畅度和易用性
-- 指出需要改进的交互环节
+4. **Key: "ux_friction"**
+   内容要求：分析认知负担、交互摩擦点、体验改进建议。使用 Markdown 的 `###` 标题和列表。
 
-## 5. Commercial ROI（商业化价值评估）
-- 分析产品的商业模式和盈利点
-- 评估市场定价策略的合理性
-- 分析目标用户群体的付费意愿
-- 评估商业化的可持续性和增长潜力
+5. **Key: "commercial_roi"**
+   内容要求：分析变现引擎、成本收益推算、增长潜力。使用 Markdown 的 `###` 标题和列表。
 
-## 6. 错位竞争建议
-- 基于以上分析，提供 1-2 条具体的错位竞争策略建议
-- 建议应该具有可执行性和差异化优势
+6. **Key: "strategy_advice"**
+   内容要求：给出 1-2 条具体的、加粗的错位竞争金句建议。
 
-**输出格式要求：**
-你必须返回一个 JSON 对象，且必须严格包含以下 6 个字段（Key 必须完全一致，不能多也不能少）：
-{{
-    "model_stack": "详细分析内容...",
-    "scene_fit": "详细分析内容...",
-    "data_moat": "详细分析内容...",
-    "ux_friction": "详细分析内容...",
-    "commercial_roi": "详细分析内容...",
-    "strategy_advice": "错位竞争建议内容..."
-}}
-
-重要要求：
-1. 必须返回有效的 JSON 格式，且 JSON 必须完整（不能截断）
-2. Key 名称必须完全匹配上述 6 个字段名
-3. 每个字段的内容必须完整，不能截断
-4. 如果内容较长，请适当精简，确保 JSON 结构完整
-5. 请确保分析深入、专业，并基于实际的产品理解
-6. 特别注意：JSON 字符串中的引号必须正确转义，确保 JSON 格式有效
+**⚠️ 格式禁令：**
+- **JSON 字段名（Key）严禁包含数字前缀**（如不要写成 "1. model_stack"）。
+- 所有 Value 中的内容必须结构化，多用 **加粗** 和 列表。
+- 所有的换行符必须转义为 '\\n'。
 """
     return prompt
 
 # ==================== 执行分析 ====================
-def perform_analysis(model, product_input: str) -> Dict:
-    """执行竞品分析"""
-    prompt = create_analysis_prompt(product_input)
+def perform_analysis(model, product_input: str, web_context: str = "") -> Dict:
+    """执行竞品分析（回归 Single-shot JSON 模式）"""
+    # 注入联网情报
+    prompt = create_analysis_prompt(product_input, web_context)
     
     try:
-        with st.spinner("🔍 正在进行深度分析，请稍候..."):
+        with st.spinner("🔍 正在进行深度建模与 JSON 构建..."):
             response = model.generate_content(prompt)
             response_text = response.text
         
-        # 直接解析 JSON 响应（因为已配置 response_mime_type="application/json"）
+        # 1. 基础清理
+        json_text = response_text.strip()
+        if json_text.startswith("```json"):
+            json_text = json_text[7:].strip()
+        if json_text.startswith("```"):
+            json_text = json_text[3:].strip()
+        if json_text.endswith("```"):
+            json_text = json_text[:-3].strip()
+            
         try:
-            # 清理可能的代码块标记
-            json_text = response_text.strip()
-            if json_text.startswith("```json"):
-                json_text = json_text[7:].strip()
-            if json_text.startswith("```"):
-                json_text = json_text[3:].strip()
-            if json_text.endswith("```"):
-                json_text = json_text[:-3].strip()
-            
-            # 解析 JSON
+            # 2. 尝试标准解析
             analysis_result = json.loads(json_text)
-            
-            # 验证必需的字段
-            required_keys = ["model_stack", "scene_fit", "data_moat", "ux_friction", "commercial_roi", "strategy_advice"]
-            missing_keys = [key for key in required_keys if key not in analysis_result]
-            
-            if missing_keys:
-                st.warning(f"⚠️ 响应缺少以下字段: {', '.join(missing_keys)}，将使用默认值填充")
-                for key in missing_keys:
-                    analysis_result[key] = "暂无数据"
-            
-            # 清理所有字段中的转义字符
-            for key in analysis_result:
-                if isinstance(analysis_result[key], str):
-                    analysis_result[key] = clean_text(analysis_result[key])
-            
-            return analysis_result
-            
-        except json.JSONDecodeError as e:
-            # JSON 解析失败，尝试修复截断的 JSON
-            try:
-                # 尝试修复未闭合的字符串
-                json_text_fixed = fix_truncated_json(json_text)
-                analysis_result = json.loads(json_text_fixed)
+        except json.JSONDecodeError:
+            # 3. 失败时调用你写的 fix_truncated_json
+            st.warning("⚠️ 检测到 JSON 异常，正在启动逻辑修复...")
+            json_text_fixed = fix_truncated_json(json_text)
+            analysis_result = json.loads(json_text_fixed)
+        
+        # 4. 字段验证与文本清理
+        required_keys = ["model_stack", "scene_fit", "data_moat", "ux_friction", "commercial_roi", "strategy_advice"]
+        for key in required_keys:
+            if key not in analysis_result:
+                analysis_result[key] = "内容生成异常"
+            else:
+                analysis_result[key] = clean_text(analysis_result[key])
                 
-                # 验证必需的字段
-                required_keys = ["model_stack", "scene_fit", "data_moat", "ux_friction", "commercial_roi", "strategy_advice"]
-                missing_keys = [key for key in required_keys if key not in analysis_result]
-                
-                if missing_keys:
-                    st.warning(f"⚠️ JSON 被截断，缺少以下字段: {', '.join(missing_keys)}，将使用默认值填充")
-                    for key in missing_keys:
-                        analysis_result[key] = "内容被截断，请重试分析"
-                
-                # 清理所有字段中的转义字符
-                for key in analysis_result:
-                    if isinstance(analysis_result[key], str):
-                        analysis_result[key] = clean_text(analysis_result[key])
-                
-                st.warning("⚠️ JSON 响应被截断，已尝试修复。建议重试以获得完整结果。")
-                return analysis_result
-                
-            except (json.JSONDecodeError, Exception) as fix_error:
-                # 修复失败，显示详细错误信息
-                st.error(f"❌ JSON 解析失败: {str(e)}")
-                st.error("**可能的原因：**")
-                st.write("- JSON 响应被截断（内容过长）")
-                st.write("- JSON 格式错误（引号未正确转义）")
-                st.error("**响应内容（前 1000 字符）：**")
-                st.code(response_text[:1000] + "..." if len(response_text) > 1000 else response_text)
-                st.warning("⚠️ 请重试分析，或尝试简化产品描述")
-                return None
-    
+        return analysis_result
+
     except Exception as e:
-        st.error(f"❌ 分析过程中出现错误: {str(e)}")
-        return None
+        st.error(f"❌ 分析失败: {str(e)}")
+        # 即使彻底失败，也返回一个空结构防止前端崩溃
+        return {k: f"分析失败: {str(e)}" for k in ["model_stack", "scene_fit", "data_moat", "ux_friction", "commercial_roi", "strategy_advice"]}
 
 # ==================== 文本解析备用方案 ====================
 def parse_text_response(text: str) -> Dict:
@@ -414,19 +382,16 @@ def clean_text(text: str) -> str:
     if not text or not isinstance(text, str):
         return text
     
-    # 处理转义字符，按顺序处理以避免重复替换
-    # 先处理双反斜杠的情况（如果原本就是转义的）
+    # 针对 JSON 字符串中的 Markdown 换行进行深度清理
     text = text.replace('\\\\n', '\n')
-    text = text.replace('\\\\t', '\t')
-    text = text.replace('\\\\r', '\r')
-    
-    # 然后处理单反斜杠的转义字符
     text = text.replace('\\n', '\n')
-    text = text.replace('\\t', '\t')
-    text = text.replace('\\r', '\r')
+    text = text.replace('\\t', '    ')
     
-    # 清理多余的空行（连续3个或更多换行符替换为2个）
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    # 清理多余的引号和首尾空格
+    text = text.strip().strip('"')
+    
+    # 确保 Markdown 标题前有换行，防止渲染问题
+    text = re.sub(r'([^\n])###', r'\1\n###', text)
     
     return text
 
@@ -700,13 +665,17 @@ def main():
         if not product_input.strip():
             st.warning("⚠️ 请输入竞品名称或产品描述")
         else:
-            # 执行分析
-            analysis_result = perform_analysis(model, product_input)
+            # 新增步骤：执行实时搜索
+            with st.status("🛸 正在全网搜集情报...", expanded=True) as status:
+                st.write("正在检索最新市场动态 (Tavily)...")
+                web_context = fetch_competitor_context(product_input)
+            
+                st.write("情报已汇总，正在进行逻辑建模...")
+                analysis_result = perform_analysis(model, product_input, web_context)
             
             if analysis_result:
-                # 添加到历史记录（包含分析结果）
+                status.update(label="✅ 深度分析完成", state="complete", expanded=False)
                 add_to_history(product_input, analysis_result)
-                
                 # 保存到 session state
                 st.session_state['last_analysis'] = analysis_result
                 st.session_state['last_product'] = product_input
@@ -714,90 +683,50 @@ def main():
                 st.session_state['last_markdown'] = markdown_report
                 st.rerun()  # 重新运行以显示结果
     
-    # 显示分析结果（从 session_state 读取，确保下载后不消失）
+# ==================== 显示分析结果 ====================
     if 'last_analysis' in st.session_state and st.session_state.get('last_analysis'):
         analysis_result = st.session_state['last_analysis']
         product_name = st.session_state.get('last_product', '未知产品')
         
-        # 显示分析结果
-        st.success("✅ 分析完成！")
-        st.markdown("---")
+        st.success(f"✅ {product_name} 分析已就绪")
         
-        # 使用 Tabs 展示 6 个维度（包括错位竞争建议）
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "🔧 技术栈",
-            "🎯 场景适配",
-            "🛡️ 数据护城河",
-            "⚡ 交互痛点",
-            "💰 商业化",
-            "💡 竞争建议"
+            "🔧 技术栈", "🎯 场景适配", "🛡️ 数据护城河", "⚡ 交互痛点", "💰 商业化", "💡 竞争建议"
         ])
         
-        with tab1:
+        # 统一渲染样式
+        def display_content(title, key):
             st.markdown('<div class="analysis-section">', unsafe_allow_html=True)
-            st.markdown("### 技术栈与模型依赖")
-            content = clean_text(analysis_result.get("model_stack", "暂无数据"))
-            st.markdown(content)
+            st.markdown(f"### {title}")
+            st.markdown(analysis_result.get(key, "暂无内容"))
             st.markdown('</div>', unsafe_allow_html=True)
-        
-        with tab2:
-            st.markdown('<div class="analysis-section">', unsafe_allow_html=True)
-            st.markdown("### 核心解决的细分场景")
-            content = clean_text(analysis_result.get("scene_fit", "暂无数据"))
-            st.markdown(content)
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with tab3:
-            st.markdown('<div class="analysis-section">', unsafe_allow_html=True)
-            st.markdown("### 数据闭环与护城河")
-            content = clean_text(analysis_result.get("data_moat", "暂无数据"))
-            st.markdown(content)
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with tab4:
-            st.markdown('<div class="analysis-section">', unsafe_allow_html=True)
-            st.markdown("### 交互痛点分析")
-            content = clean_text(analysis_result.get("ux_friction", "暂无数据"))
-            st.markdown(content)
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with tab5:
-            st.markdown('<div class="analysis-section">', unsafe_allow_html=True)
-            st.markdown("### 商业化价值评估")
-            content = clean_text(analysis_result.get("commercial_roi", "暂无数据"))
-            st.markdown(content)
-            st.markdown('</div>', unsafe_allow_html=True)
-        
+
+        with tab1: display_content("技术栈与模型依赖", "model_stack")
+        with tab2: display_content("核心解决的细分场景", "scene_fit")
+        with tab3: display_content("数据闭环与护城河", "data_moat")
+        with tab4: display_content("交互痛点分析", "ux_friction")
+        with tab5: display_content("商业化价值评估", "commercial_roi")
         with tab6:
-            strategy_advice = analysis_result.get("strategy_advice", "")
-            st.markdown('<div class="analysis-section">', unsafe_allow_html=True)
-            st.markdown("### 错位竞争建议")
-            if strategy_advice:
-                formatted_advice = format_competitive_advantage(strategy_advice)
-                # 再次清理格式化后的内容
-                formatted_advice = clean_text(formatted_advice)
-                st.markdown(formatted_advice)
-            else:
-                st.markdown("暂无数据")
+            st.markdown('<div class="analysis-section" style="background-color: #e3f2fd; border-left: 5px solid #1f77b4;">', unsafe_allow_html=True)
+            st.markdown("### 💡 错位竞争建议")
+            # 使用你之前的格式化建议函数
+            formatted_advice = format_competitive_advantage(analysis_result.get("strategy_advice", ""))
+            st.markdown(formatted_advice)
             st.markdown('</div>', unsafe_allow_html=True)
-        
-        # 导出 Markdown 报告（始终显示，即使点击下载也不会消失）
         st.markdown("---")
-        markdown_report = st.session_state.get('last_markdown', generate_markdown_report(product_name, analysis_result))
+        markdown_report = generate_markdown_report(product_name, analysis_result)
         
-        # 生成文件名
         safe_product_name = "".join(c for c in product_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        filename = f"竞品分析_{safe_product_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        filename = f"调研报告_{safe_product_name}_{datetime.now().strftime('%Y%m%d')}.md"
         
         st.download_button(
-            label="📥 下载 Markdown 报告",
+            label="📥 下载完整分析报告 (Markdown)",
             data=markdown_report,
             file_name=filename,
             mime="text/markdown",
             type="primary",
             use_container_width=True
         )
-
 if __name__ == "__main__":
     main()
 
